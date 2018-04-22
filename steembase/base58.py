@@ -3,17 +3,17 @@ import hashlib
 import sys
 import string
 import logging
-log = logging.getLogger(__name__)
+from steem.utils import compat_bytes
 
-""" This class and the methods require python3 """
-assert sys.version_info[0] == 3, "graphenelib requires python3"
+log = logging.getLogger(__name__)
 
 """ Default Prefix """
 PREFIX = "STM"
 
 known_prefixes = [
     PREFIX,
-    "TEST",
+    "GLS",
+    "TST",
 ]
 
 
@@ -21,26 +21,37 @@ class Base58(object):
     """Base58 base class
 
     This class serves as an abstraction layer to deal with base58 encoded
-    strings and their corresponding hex and binary representation throughout the
-    library.
+    strings and their corresponding hex and binary representation
+    throughout the library.
 
-    :param data: Data to initialize object, e.g. pubkey data, address data, ...
+    :param data: Data to initialize object, e.g. pubkey data, address data,
+    ...
+
     :type data: hex, wif, bip38 encrypted wif, base58 string
-    :param str prefix: Prefix to use for Address/PubKey strings (defaults to ``GPH``)
+
+    :param str prefix: Prefix to use for Address/PubKey strings (defaults
+    to ``GPH``)
+
     :return: Base58 object initialized with ``data``
+
     :rtype: Base58
+
     :raises ValueError: if data cannot be decoded
 
     * ``bytes(Base58)``: Returns the raw data
     * ``str(Base58)``:   Returns the readable ``Base58CheckEncoded`` data.
     * ``repr(Base58)``:  Gives the hex representation of the data.
-    *  ``format(Base58,_format)`` Formats the instance according to ``_format``:
+
+    *  ``format(Base58,_format)`` Formats the instance according to
+    ``_format``:
+
         * ``"btc"``: prefixed with ``0x80``. Yields a valid btc address
         * ``"wif"``: prefixed with ``0x00``. Yields a valid wif key
         * ``"bts"``: prefixed with ``BTS``
         * etc.
 
     """
+
     def __init__(self, data, prefix=PREFIX):
         self._prefix = prefix
         if all(c in string.hexdigits for c in data):
@@ -105,7 +116,7 @@ BASE58_ALPHABET = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 
 
 def base58decode(base58_str):
-    base58_text = bytes(base58_str, "ascii")
+    base58_text = base58_str.encode('ascii')
     n = 0
     leading_zeroes_count = 0
     for b in base58_text:
@@ -123,7 +134,10 @@ def base58decode(base58_str):
 
 
 def base58encode(hexstring):
-    byteseq = bytes(unhexlify(bytes(hexstring, 'ascii')))
+    byteseq = compat_bytes(hexstring, 'ascii')
+    byteseq = unhexlify(byteseq)
+    byteseq = compat_bytes(byteseq)
+
     n = 0
     leading_zeroes_count = 0
     for c in byteseq:
@@ -137,6 +151,7 @@ def base58encode(hexstring):
         n = div
     else:
         res.insert(0, BASE58_ALPHABET[n])
+
     return (BASE58_ALPHABET[0:1] * leading_zeroes_count + res).decode('ascii')
 
 
@@ -169,7 +184,7 @@ def base58CheckDecode(s):
     s = unhexlify(base58decode(s))
     dec = hexlify(s[:-4]).decode('ascii')
     checksum = doublesha256(dec)[:4]
-    assert(s[-4:] == checksum)
+    assert (s[-4:] == checksum)
     return dec[2:]
 
 
@@ -183,5 +198,5 @@ def gphBase58CheckDecode(s):
     s = unhexlify(base58decode(s))
     dec = hexlify(s[:-4]).decode('ascii')
     checksum = ripemd160(dec)[:4]
-    assert(s[-4:] == checksum)
+    assert (s[-4:] == checksum)
     return dec

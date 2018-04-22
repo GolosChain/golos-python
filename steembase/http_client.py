@@ -1,19 +1,25 @@
 # coding=utf-8
-import concurrent.futures
 import json
 import logging
 import socket
 import time
+import sys
 from functools import partial
-from http.client import RemoteDisconnected
 from itertools import cycle
-from urllib.parse import urlparse
-
+import concurrent.futures
 import certifi
 import urllib3
 from steembase.exceptions import RPCError
+from steembase.exceptions import InvalidAPICallFormat
 from urllib3.connection import HTTPConnection
 from urllib3.exceptions import MaxRetryError, ReadTimeoutError, ProtocolError
+
+if sys.version >= '3.0':
+    from http.client import RemoteDisconnected
+    from urllib.parse import urlparse
+else:
+    from urlparse import urlparse
+    from httplib import HTTPException
 
 logger = logging.getLogger(__name__)
 
@@ -29,16 +35,18 @@ class HttpClient(object):
     .. code-block:: python
 
        from steem.http_client import HttpClient
-       rpc = HttpClient(['https://steemd-node1.com', 'https://steemd-node2.com'])
+
+       rpc = HttpClient(['https://steemd-node1.com',
+       'https://steemd-node2.com'])
 
     any call available to that port can be issued using the instance
-    via the syntax ``rpc.exec('command', *parameters)``.
+    via the syntax ``rpc.call('command', *parameters)``.
 
     Example:
 
     .. code-block:: python
 
-       rpc.exec(
+       rpc.call(
            'get_followers',
            'furion', 'abit', 'blog', 10,
            api='follow_api'
@@ -93,7 +101,11 @@ class HttpClient(object):
         """ Switch to the next available node.
 
         This method will change base URL of our requests.
-        Use it when the current node goes down to change to a fallback node. """
+
+        Use it when the current node goes down to change to a fallback
+        node.
+
+        """
         self.set_node(next(self.nodes))
 
     def set_node(self, node_url):
@@ -106,49 +118,95 @@ class HttpClient(object):
         return urlparse(self.url).hostname
 
     @staticmethod
-    def json_rpc_body(name, *args, api=None, as_json=True, _id=0):
+    def json_rpc_body(name, *args, **kwargs):
         """ Build request body for steemd RPC requests.
 
         Args:
-            name (str): Name of a method we are trying to call. (ie: `get_accounts`)
+
+            name (str): Name of a method we are trying to call. (ie:
+            `get_accounts`)
+
             args: A list of arguments belonging to the calling method.
+
             api (None, str): If api is provided (ie: `follow_api`),
              we generate a body that uses `call` method appropriately.
-            as_json (bool): Should this function return json as dictionary or string.
-            _id (int): This is an arbitrary number that can be used for request/response tracking in multi-threaded
-             scenarios.
+
+            as_json (bool): Should this function return json as dictionary
+            or string.
+
+            _id (int): This is an arbitrary number that can be used for
+            request/response tracking in multi-threaded scenarios.
 
         Returns:
-            (dict,str): If `as_json` is set to `True`, we get json formatted as a string.
+
+            (dict,str): If `as_json` is set to `True`, we get json
+            formatted as a string.
+
             Otherwise, a Python dictionary is returned.
+
         """
+        api = kwargs.pop('api', None)
+        as_json = kwargs.pop('as_json', True)
+        _id = kwargs.pop('_id', 0)
+
+        unwanted_keys = ['return_with_args', '_ret_cnt']
+        sanitized_kwargs = dict(kwargs)
+        for key in unwanted_keys:
+            if key in sanitized_kwargs:
+                del sanitized_kwargs[key]
+
+        if not api:
+
+            raise InvalidAPICallFormat("You need to provide 'api' kwarg")
+
         headers = {"jsonrpc": "2.0", "id": _id}
-        if api:
-            body_dict = {**headers, "method": "call", "params": [api, name, args]}
+        if sanitized_kwargs is not None and len(sanitized_kwargs) > 0:
+
+            body_dict = dict(headers)
+            body_dict.update({"method": "call",
+                              "params": [api, name, sanitized_kwargs]})
         else:
-            body_dict = {**headers, "method": name, "params": args}
+
+            body_dict = dict(headers)
+            body_dict.update({"method": "call",
+                              "params": [api, name, args]})
+
         if as_json:
             return json.dumps(body_dict, ensure_ascii=False).encode('utf8')
         else:
             return body_dict
 
-    def exec(self, name, *args, api=None, return_with_args=None, _ret_cnt=0):
-        """ Execute a method against steemd RPC.
+    def call(self,
+             name,
+             *args,
+             **kwargs):
+        """ Call a remote procedure in steemd.
 
         Warnings:
-            This command will auto-retry in case of node failure, as well as handle
-            node fail-over, unless we are broadcasting a transaction.
-            In latter case, the exception is **re-raised**.
+
+            This command will auto-retry in case of node failure, as well
+            as handle node fail-over, unless we are broadcasting a
+            transaction.  In latter case, the exception is **re-raised**.
+
         """
-        body = HttpClient.json_rpc_body(name, *args, api=api)
+
+        api = kwargs.get('api', None)
+        return_with_args = kwargs.get('return_with_args', None)
+        _ret_cnt = kwargs.get('_ret_cnt', 0)
+
+        body = HttpClient.json_rpc_body(name, *args, **kwargs)
         response = None
+
+        if sys.version > '3.0':
+            errorList = (MaxRetryError, ReadTimeoutError, ProtocolError,
+                         RemoteDisconnected, ConnectionResetError,)
+        else:
+            errorList = (MaxRetryError, ReadTimeoutError, ProtocolError,
+                         HTTPException,)
+
         try:
             response = self.request(body=body)
-        except (MaxRetryError,
-                ConnectionResetError,
-                ReadTimeoutError,
-                RemoteDisconnected,
-                ProtocolError) as e:
+        except (errorList) as e:
             # if we broadcasted a transaction, always raise
             # this is to prevent potential for double spend scenario
             if api == 'network_broadcast_api':
@@ -156,15 +214,20 @@ class HttpClient(object):
 
             # try switching nodes before giving up
             if _ret_cnt > 2:
-                time.sleep(_ret_cnt) # we should wait only a short period before trying the next node, but still slowly increase backoff
-            elif _ret_cnt > 10:
+                # we should wait only a short period before trying
+                # the next node, but still slowly increase backoff
+                time.sleep(_ret_cnt)
+            if _ret_cnt > 10:
                 raise e
             self.next_node()
             logging.debug('Switched node to %s due to exception: %s' %
                           (self.hostname, e.__class__.__name__))
-            return self.exec(name, *args,
-                             return_with_args=return_with_args,
-                             _ret_cnt=_ret_cnt + 1)
+            return self.call(
+                name,
+                *args,
+                api=api,
+                return_with_args=return_with_args,
+                _ret_cnt=_ret_cnt + 1)
         except Exception as e:
             if self.re_raise:
                 raise e
@@ -176,8 +239,9 @@ class HttpClient(object):
                     args=args,
                     return_with_args=return_with_args)
         else:
-            if response.status not in tuple(
-                    [*response.REDIRECT_STATUSES, 200]):
+            redirectStatuses = list(response.REDIRECT_STATUSES)
+            redirectStatuses.append(200)
+            if response.status not in tuple(redirectStatuses):
                 logger.info('non 200 response:%s', response.status)
 
             return self._return(
@@ -213,14 +277,17 @@ class HttpClient(object):
         else:
             return result
 
-    def exec_multi_with_futures(self, name, params, api=None, max_workers=None):
+    def call_multi_with_futures(self, name, params, api=None,
+                                max_workers=None):
         with concurrent.futures.ThreadPoolExecutor(
                 max_workers=max_workers) as executor:
             # Start the load operations and mark each future with its URL
             def ensure_list(parameter):
-                return parameter if type(parameter) in (list, tuple, set) else [parameter]
+                return parameter if type(parameter) in (list, tuple,
+                                                        set) else [parameter]
 
-            futures = (executor.submit(self.exec, name, *ensure_list(param), api=api)
-                       for param in params)
+            futures = (executor.submit(
+                self.call, name, *ensure_list(param), api=api)
+                for param in params)
             for future in concurrent.futures.as_completed(futures):
                 yield future.result()

@@ -4,14 +4,21 @@ import logging
 import os
 import re
 import time
+import sys
 from datetime import datetime
-from json import JSONDecodeError
-from urllib.parse import urlparse
+
+import future
+from builtins import bytes
 
 import w3lib.url
 from langdetect import DetectorFactory, detect
 from langdetect.lang_detect_exception import LangDetectException
 from toolz import update_in, assoc
+
+if sys.version >= '3.0':
+    from urllib.parse import urlparse
+else:
+    from urlparse import urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +33,7 @@ DetectorFactory.seed = 0
 MIN_TEXT_LENGTH_FOR_DETECTION = 20
 
 
-def block_num_from_hash(block_hash: str) -> int:
+def block_num_from_hash(block_hash):
     """
     return the first 4 bytes (8 hex digits) of the block ID (the block_num)
     Args:
@@ -38,7 +45,7 @@ def block_num_from_hash(block_hash: str) -> int:
     return int(str(block_hash)[:8], base=16)
 
 
-def block_num_from_previous(previous_block_hash: str) -> int:
+def block_num_from_previous(previous_block_hash):
     """
 
     Args:
@@ -176,13 +183,15 @@ def detect_language(text):
 
 def is_comment(item):
     """Quick check whether an item is a comment (reply) to another post.
-    The item can be a Post object or just a raw comment object from the blockchain.
+    The item can be a Post object or just a raw comment object from the
+    blockchain.
     """
     return item['permlink'][:3] == "re-" and item['parent_author']
 
 
 def time_elapsed(posting_time):
-    """Takes a string time from a post or blockchain event, and returns a time delta from now.
+    """Takes a string time from a post or blockchain event, and returns a
+    time delta from now.
     """
     if type(posting_time) == str:
         posting_time = parse_time(posting_time)
@@ -190,7 +199,8 @@ def time_elapsed(posting_time):
 
 
 def parse_time(block_time):
-    """Take a string representation of time from the blockchain, and parse it into datetime object.
+    """Take a string representation of time from the blockchain, and parse
+    it into datetime object.
     """
     return datetime.strptime(block_time, '%Y-%m-%dT%H:%M:%S')
 
@@ -221,23 +231,29 @@ def remove_from_dict(obj, remove_keys=list()):
     return {k: v for k, v in items if k not in remove_keys}
 
 
-def construct_identifier(*args, username_prefix='@'):
-    """ Create a post identifier from comment/post object or arguments. 
-    
+def construct_identifier(username_prefix='@', *args):
+    """ Create a post identifier from comment/post object or arguments.
+
     Examples:
-        
-        :: 
-        
-            construct_identifier('username', 'permlink')
-            construct_identifier({'author': 'username', 'permlink': 'permlink'})
+
+        ::
+            construct_identifier('@', 'username', 'permlink')
+            construct_identifier('@', {'author': 'username',
+                'permlink': 'permlink'})
     """
+    # https://github.com/steemit/steem-python/issues/165
+    # this is assert here will be removed with the above issue
+    # addressed.
+    assert(username_prefix == '@')
+
     if len(args) == 1:
         op = args[0]
         author, permlink = op['author'], op['permlink']
     elif len(args) == 2:
         author, permlink = args
     else:
-        raise ValueError('construct_identifier() received unparsable arguments')
+        raise ValueError(
+            'construct_identifier() received unparsable arguments')
 
     fields = dict(prefix=username_prefix, author=author, permlink=permlink)
     return "{prefix}{author}/{permlink}".format(**fields)
@@ -303,7 +319,8 @@ def fmt_time_from_now(secs=0):
         :rtype: str
 
     """
-    return datetime.utcfromtimestamp(time.time() + int(secs)).strftime('%Y-%m-%dT%H:%M:%S')
+    return datetime.utcfromtimestamp(time.time() + int(secs)).strftime(
+        '%Y-%m-%dT%H:%M:%S')
 
 
 def env_unlocked():
@@ -349,3 +366,77 @@ def strfdelta(tdelta, fmt):
 
 def is_valid_account_name(name):
     return re.match('^[a-z][a-z0-9\-.]{2,15}$', name)
+
+
+def compat_compose_dictionary(dictionary, **kwargs):
+    """
+    This method allows us the one line dictionary composition that is offered by the ** dictionary unpacking
+    available in 3.6.
+
+    :param dictionary: the dictionary to add the kwargs elements to.
+    :param kwargs: a set of key/value pairs to add to `dictionary`.
+    :return: the composed dictionary.
+    """
+    composed_dict = dictionary.copy()
+    composed_dict.update(kwargs)
+
+    return composed_dict
+
+
+def compat_bytes(item, encoding=None):
+    """
+    This method is required because Python 2.7 `bytes` is simply an alias for `str`. Without this method,
+    code execution would look something like:
+
+    class clazz(object):
+
+        def __bytes__(self):
+            return bytes(5)
+
+
+    Python 2.7:
+
+    c = clazz()
+    bytes(c)
+    >>'<__main__.clazz object at 0x105171a90>'
+
+    In this example, when `bytes(c)` is invoked, the interpreter then calls `str(c)`, and prints the above string.
+    the method `__bytes__` is never invoked.
+
+    Python 3.6:
+    c = clazz()
+    bytes(c)
+    >>b'\x00\x00\x00\x00\x00'
+
+    This is the expected and necessary behavior across both platforms.
+
+    w/ future_bytes method, we will ensure that the correct bytes method is always invoked, avoiding the `str` alias in
+    2.7.
+
+    :param item: this is the object who's bytes method needs to be invoked
+    :param encoding: optional encoding parameter to handle the Python 3.6 two argument 'bytes' method.
+    :return: a bytes object that functions the same across 3.6 and 2.7
+    """
+    if hasattr(item, '__bytes__'):
+        return item.__bytes__()
+    else:
+        if encoding:
+            return bytes(item, encoding)
+        else:
+            return bytes(item)
+
+
+def compat_chr(item):
+    """
+    This is necessary to maintain compatibility across Python 2.7 and 3.6.
+    In 3.6, 'chr' handles any unicode character, whereas in 2.7, `chr` only handles
+    ASCII characters. Thankfully, the Python 2.7 method `unichr` provides the same
+    functionality as 3.6 `chr`.
+
+    :param item: a length 1 string who's `chr` method needs to be invoked
+    :return: the unichr code point of the single character string, item
+    """
+    if sys.version >= '3.0':
+        return chr(item)
+    else:
+        return unichr(item)
